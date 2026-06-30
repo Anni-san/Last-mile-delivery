@@ -1,4 +1,4 @@
-
+const { authenticate } = require('./middleware/authMiddleware');
 const express = require('express');
 const bcrypt = require('bcrypt'); // For hashing passwords
 const jwt = require('jsonwebtoken'); // For creating login tokens
