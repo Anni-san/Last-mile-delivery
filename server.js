@@ -186,7 +186,42 @@ app.post('/api/auth/login', async (req, res) => {
     }
 });
 
+// --- HOUR 6: Order Status & Immutable History ---
+// We add 'authenticate' middleware to protect this route
+app.put('/api/orders/:id/status', authenticate, async (req, res) => {
+    const client = await db.getClient();
+    
+    try {
+        await client.query('BEGIN'); // Start transaction lock
+        
+        const orderId = req.params.id;
+        const { status } = req.body; // e.g., "Picked Up", "In Transit"
+        const actorId = req.user.id; // We get this securely from their JWT token!
 
+        // 1. Update the main Order status
+        await client.query(`UPDATE orders SET status = $1 WHERE id = $2`, [status, orderId]);
+
+        // 2. Insert the unchangeable record into tracking_history
+        await client.query(`
+            INSERT INTO tracking_history (order_id, status, actor_id) 
+            VALUES ($1, $2, $3)
+        `, [orderId, status, actorId]);
+
+        await client.query('COMMIT'); // Save changes
+        
+        res.status(200).json({ 
+            success: true, 
+            message: `Order #${orderId} status safely updated to '${status}'. History logged.` 
+        });
+
+    } catch (error) {
+        await client.query('ROLLBACK'); // Undo if anything fails
+        console.error("Status Update Error:", error);
+        res.status(500).json({ error: "Failed to update order status." });
+    } finally {
+        client.release();
+    }
+});
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
