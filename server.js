@@ -5,7 +5,7 @@ const jwt = require('jsonwebtoken'); // For creating login tokens
 const cors = require('cors');
 const db = require('./db'); // This imports your PostgreSQL connection
 require('dotenv').config();
-
+const sendEmail = require('./utils/sendEmail');
 const app = express();
 
 app.use(cors());
@@ -186,36 +186,53 @@ app.post('/api/auth/login', async (req, res) => {
     }
 });
 
-// --- HOUR 6: Order Status & Immutable History ---
-// We add 'authenticate' middleware to protect this route
+// --- HOUR 6 & 7: Order Status, History & Notifications ---
 app.put('/api/orders/:id/status', authenticate, async (req, res) => {
     const client = await db.getClient();
     
     try {
-        await client.query('BEGIN'); // Start transaction lock
+        await client.query('BEGIN');
         
         const orderId = req.params.id;
-        const { status } = req.body; // e.g., "Picked Up", "In Transit"
-        const actorId = req.user.id; // We get this securely from their JWT token!
+        const { status } = req.body; 
+        const actorId = req.user.id; 
 
-        // 1. Update the main Order status
+        // 1. Update main order
         await client.query(`UPDATE orders SET status = $1 WHERE id = $2`, [status, orderId]);
 
-        // 2. Insert the unchangeable record into tracking_history
+        // 2. Insert immutable history
         await client.query(`
             INSERT INTO tracking_history (order_id, status, actor_id) 
             VALUES ($1, $2, $3)
         `, [orderId, status, actorId]);
 
-        await client.query('COMMIT'); // Save changes
+        // 3. Free up the agent if the delivery failed
+        if (status === 'Failed') {
+            await client.query(`
+                UPDATE agents SET status = 'AVAILABLE' 
+                WHERE id = (SELECT agent_id FROM orders WHERE id = $1)
+            `, [orderId]);
+        }
+
+        await client.query('COMMIT'); 
+
+        // 4. Fire off the email notification
+        let message = `Your order #${orderId} has been updated to: ${status}.`;
         
+        if (status === 'Failed') {
+            message += " We missed you! Please log in to your portal to reschedule the delivery.";
+        }
+        
+        // The 'to' address is handled inside the utility file for now
+        sendEmail("dummy@email.com", "Order Status Update", message);
+
         res.status(200).json({ 
             success: true, 
-            message: `Order #${orderId} status safely updated to '${status}'. History logged.` 
+            message: `Order updated to '${status}'. Notification sent.` 
         });
 
     } catch (error) {
-        await client.query('ROLLBACK'); // Undo if anything fails
+        await client.query('ROLLBACK'); 
         console.error("Status Update Error:", error);
         res.status(500).json({ error: "Failed to update order status." });
     } finally {
