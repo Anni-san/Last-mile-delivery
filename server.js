@@ -55,7 +55,70 @@ app.post('/api/rates/calculate', async (req, res) => {
     }
 });
 
+// --- HOUR 4: Order Creation & Auto-Assignment API ---
+app.post('/api/orders', async (req, res) => {
+    // We get a dedicated client for our transaction
+    const client = await db.getClient(); 
+    
+    try {
+        await client.query('BEGIN'); // Start the transaction lock
 
+        const { customerId, pickupZoneId, dropZoneId, actualWeight, volumetricWeight, chargeableWeight, totalCharge } = req.body;
+
+        // 1. Create the Order first (Status: PENDING)
+        const orderInsertQuery = `
+            INSERT INTO orders (customer_id, pickup_zone_id, drop_zone_id, actual_weight, volumetric_weight, chargeable_weight, total_charge)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            RETURNING id;
+        `;
+        const orderResult = await client.query(orderInsertQuery, [customerId, pickupZoneId, dropZoneId, actualWeight, volumetricWeight, chargeableWeight, totalCharge]);
+        const newOrderId = orderResult.rows[0].id;
+
+        // 2. Find an available agent in the pickup zone and LOCK the row so no one else can claim them
+        const agentQuery = `
+            SELECT id FROM agents 
+            WHERE current_zone_id = $1 AND status = 'AVAILABLE' 
+            ORDER BY last_idle_time ASC 
+            LIMIT 1 
+            FOR UPDATE; -- This locks the row!
+        `;
+        const agentResult = await client.query(agentQuery, [pickupZoneId]);
+
+        if (agentResult.rows.length === 0) {
+            // No agents available right now. Commit the pending order and return.
+            await client.query('COMMIT');
+            return res.status(202).json({ 
+                success: true, 
+                message: "Order created, but no agents currently available. Queued for assignment.",
+                orderId: newOrderId 
+            });
+        }
+
+        const assignedAgentId = agentResult.rows[0].id;
+
+        // 3. Mark the Agent as BUSY
+        await client.query(`UPDATE agents SET status = 'BUSY' WHERE id = $1`, [assignedAgentId]);
+
+        // 4. Update the Order with the assigned agent and change status
+        await client.query(`UPDATE orders SET agent_id = $1, status = 'ASSIGNED' WHERE id = $2`, [assignedAgentId, newOrderId]);
+
+        await client.query('COMMIT'); // Success! Unlock the database.
+
+        res.status(201).json({
+            success: true,
+            message: "Order created and agent assigned successfully!",
+            orderId: newOrderId,
+            agentId: assignedAgentId
+        });
+
+    } catch (error) {
+        await client.query('ROLLBACK'); // If anything fails, undo all database changes
+        console.error("Assignment Error:", error);
+        res.status(500).json({ error: "Failed to create order and assign agent" });
+    } finally {
+        client.release(); // Always return the client to the pool
+    }
+});
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
