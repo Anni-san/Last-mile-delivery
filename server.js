@@ -122,6 +122,69 @@ app.post('/api/orders', async (req, res) => {
     }
 });
 
+// --- HOUR 5: Authentication Routes ---
+
+// 1. Register a new user
+app.post('/api/auth/register', async (req, res) => {
+    try {
+        const { name, email, password, role } = req.body;
+        
+        // Hash the password so it isn't saved as plain text (crucial for security)
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(password, salt);
+
+        // Insert the user into PostgreSQL
+        const newUserQuery = `
+            INSERT INTO users (name, email, password, role) 
+            VALUES ($1, $2, $3, $4) 
+            RETURNING id, name, email, role;
+        `;
+        const newUser = await db.query(newUserQuery, [name, email, hashedPassword, role]);
+
+        res.status(201).json({ success: true, user: newUser.rows[0] });
+    } catch (error) {
+        console.error("Register Error:", error);
+        res.status(500).json({ error: "Registration failed. Email might already exist." });
+    }
+});
+
+// 2. Login
+app.post('/api/auth/login', async (req, res) => {
+    try {
+        const { email, password } = req.body;
+
+        // Find the user by email
+        const userResult = await db.query(`SELECT * FROM users WHERE email = $1`, [email]);
+        if (userResult.rows.length === 0) {
+            return res.status(400).json({ error: "Invalid email or password." });
+        }
+
+        const user = userResult.rows[0];
+
+        // Compare the password they typed with the hashed password in the DB
+        const validPassword = await bcrypt.compare(password, user.password);
+        if (!validPassword) {
+            return res.status(400).json({ error: "Invalid email or password." });
+        }
+
+        // Generate the JWT Token (valid for 24 hours)
+        const token = jwt.sign(
+            { id: user.id, role: user.role }, 
+            process.env.JWT_SECRET, 
+            { expiresIn: '1d' }
+        );
+
+        res.status(200).json({ 
+            success: true, 
+            token, 
+            user: { id: user.id, name: user.name, role: user.role } 
+        });
+    } catch (error) {
+        console.error("Login Error:", error);
+        res.status(500).json({ error: "Login failed." });
+    }
+});
+
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
